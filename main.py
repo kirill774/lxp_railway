@@ -80,6 +80,55 @@ def save_user(uid: int, data: dict) -> None:
 def get_user_orders(uid: int) -> list:
     return [o for o in _orders if o.get("user_id") == uid]
 
+def build_job_response(job: dict, user: dict) -> dict:
+    free = job["user_id"] in FREE_IDS
+    price = 0 if free else job["price"]
+    stars = 0 if free else job["stars"]
+    payment = None if free else {
+        "card": PAYMENT_CARD,
+        "phone": PAYMENT_PHONE,
+        "name": PAYMENT_NAME,
+        "amount": price,
+        "stars": stars,
+        "order_id": job["order_id"],
+    }
+    return {
+        "ok": True,
+        "job_id": job["job_id"],
+        "order_id": job["order_id"],
+        "status": job["status"],
+        "answer": job.get("result") or "",
+        "error": job.get("error") or "",
+        "price": price,
+        "stars": stars,
+        "free": free,
+        "payment": payment,
+        "created_at": job["created_at"],
+        "completed_at": job.get("completed_at"),
+    }
+
+def append_order_once(job: dict, user: dict) -> None:
+    if any(o.get("order_id") == job["order_id"] for o in _orders):
+        return
+    free = job["user_id"] in FREE_IDS
+    _orders.append({
+        "order_id": job["order_id"],
+        "user_id": job["user_id"],
+        "username": user.get("username", ""),
+        "name": job["name"],
+        "group": job.get("group", ""),
+        "subject": job["subject"],
+        "task": job["task"][:200],
+        "price": 0 if free else job["price"],
+        "stars": 0 if free else job["stars"],
+        "urgent": job["urgent"],
+        "free": free,
+        "paid": free,
+        "status": "delivered",
+        "created_at": job["created_at"],
+        "completed_at": job.get("completed_at"),
+    })
+
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 import re, unicodedata
@@ -224,6 +273,8 @@ async def submit_task(body: TaskIn):
         "task":      task,
         "subject":   body.subject,
         "urgent":    body.urgent,
+        "price":     price,
+        "stars":     stars,
         "status":    "pending",
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "result":    None,
@@ -231,45 +282,19 @@ async def submit_task(body: TaskIn):
     }
 
     logger.info("Job %s created for user %s: %s", job_id, uid, task[:60])
+    return build_job_response(_jobs[job_id], user)
 
-    # Ждём результата (polling до 130 сек)
-    deadline = time.time() + 130
-    while time.time() < deadline:
-        job = _jobs.get(job_id, {})
-        if job.get("status") == "done":
-            answer = job["result"]
-            # Сохраняем заказ
-            _orders.append({
-                "order_id": order_id, "user_id": uid,
-                "username": user.get("username",""),
-                "name": profile["name"], "group": profile.get("group",""),
-                "subject": body.subject, "task": body.task[:200],
-                "price": 0 if free else price,
-                "stars": 0 if free else stars,
-                "urgent": body.urgent, "free": free, "paid": free,
-                "status": "delivered",
-                "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            })
-            payment = None if free else {
-                "card": PAYMENT_CARD, "phone": PAYMENT_PHONE,
-                "name": PAYMENT_NAME, "amount": price, "stars": stars, "order_id": order_id,
-            }
-            return {
-                "ok": True, "answer": answer,
-                "order_id": order_id,
-                "price": 0 if free else price,
-                "stars": 0 if free else stars,
-                "free": free, "payment": payment,
-            }
-        elif job.get("status") == "error":
-            raise HTTPException(500, job.get("error", "Worker error"))
-        import asyncio
-        await asyncio.sleep(1)
-
-    # Таймаут
-    _jobs[job_id]["status"] = "error"
-    _jobs[job_id]["error"] = "Timeout"
-    raise HTTPException(504, "AI не ответил вовремя. Попробуй снова.")
+@app.get("/api/jobs/{job_id}")
+async def get_job(job_id: str, init_data: str):
+    user = validate_init_data(init_data)
+    if not user:
+        raise HTTPException(403, "Invalid init_data")
+    job = _jobs.get(job_id)
+    if not job or job.get("user_id") != user["id"]:
+        raise HTTPException(404, "Job not found")
+    if job["status"] == "done":
+        append_order_once(job, user)
+    return build_job_response(job, user)
 
 @app.post("/api/payment_confirm")
 async def payment_confirm(body: PaymentIn):
@@ -317,6 +342,7 @@ async def worker_post_result(body: WorkerResultIn, x_worker_secret: str = Header
     else:
         _jobs[body.job_id]["status"] = "done"
         _jobs[body.job_id]["result"] = body.answer
+        _jobs[body.job_id]["completed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
         logger.info("Job %s done (%d chars)", body.job_id, len(body.answer))
     return {"ok": True}
 

@@ -77,6 +77,18 @@ async function api(method, path, body = null) {
   return res.json();
 }
 
+async function waitForJob(jobId, maxSeconds = 180) {
+  const startedAt = Date.now();
+  const encoded = encodeURIComponent(initData);
+  while ((Date.now() - startedAt) / 1000 < maxSeconds) {
+    const data = await api('GET', `/api/jobs/${encodeURIComponent(jobId)}?init_data=${encoded}`);
+    if (data.status === 'done') return data;
+    if (data.status === 'error') throw new Error(data.error || 'Worker error');
+    await new Promise(resolve => setTimeout(resolve, 2500));
+  }
+  throw new Error('AI не ответил вовремя. Попробуй снова.');
+}
+
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
 async function init() {
@@ -262,7 +274,10 @@ $('btn-submit').addEventListener('click', async () => {
   }, 1000);
 
   try {
-    const data = await api('POST', '/api/submit', { init_data: initData, subject, task, urgent });
+    const submitted = await api('POST', '/api/submit', { init_data: initData, subject, task, urgent });
+    const data = submitted.status === 'done'
+      ? submitted
+      : await waitForJob(submitted.job_id);
     clearInterval(state.timerInterval);
     state.currentResult = data;
     showResult(data, subject, task);

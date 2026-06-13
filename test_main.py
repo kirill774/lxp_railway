@@ -43,3 +43,44 @@ def test_subjects_endpoint_returns_prices():
     assert response.status_code == 200
     payload = response.json()
     assert payload["prices"]["kt"]["stars"] == 390
+
+
+def test_submit_returns_job_and_job_endpoint_returns_worker_result_once():
+    main._jobs.clear()
+    main._orders.clear()
+    client = TestClient(main.app)
+    user = {"id": 222, "first_name": "Student", "username": "student"}
+    init_data = make_init_data(user)
+
+    submit = client.post(
+        "/api/submit",
+        json={
+            "init_data": init_data,
+            "subject": "SMM",
+            "task": "Практическая работа по контент-плану",
+            "urgent": False,
+        },
+    )
+    assert submit.status_code == 200
+    submitted = submit.json()
+    assert submitted["status"] == "pending"
+    assert submitted["job_id"]
+    assert submitted["answer"] == ""
+
+    result = client.post(
+        "/worker/result",
+        headers={"x-worker-secret": main.WORKER_SECRET},
+        json={"job_id": submitted["job_id"], "answer": "## Готовая работа"},
+    )
+    assert result.status_code == 200
+
+    job = client.get(f"/api/jobs/{submitted['job_id']}", params={"init_data": init_data})
+    assert job.status_code == 200
+    payload = job.json()
+    assert payload["status"] == "done"
+    assert payload["answer"] == "## Готовая работа"
+    assert len(main._orders) == 1
+
+    second_read = client.get(f"/api/jobs/{submitted['job_id']}", params={"init_data": init_data})
+    assert second_read.status_code == 200
+    assert len(main._orders) == 1
