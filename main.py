@@ -16,9 +16,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl
 
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -35,6 +35,9 @@ ALLOWED_ORIGINS = [
     for origin in os.getenv("ALLOWED_ORIGINS", "").split(",")
     if origin.strip()
 ]
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
+logger = logging.getLogger("railway")
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is required")
@@ -56,9 +59,6 @@ SUBJECTS = [
     "Брендинг. Стратегии", "Английский язык А2", "Фотосъёмка",
     "Adobe Photoshop", "Другой предмет",
 ]
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
-logger = logging.getLogger("railway")
 
 # ─── In-memory storage ────────────────────────────────────────────────────────
 
@@ -176,6 +176,23 @@ def worker_auth(secret: str) -> bool:
 # ─── FastAPI ──────────────────────────────────────────────────────────────────
 
 app = FastAPI(title="LXP Railway API")
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error("Unhandled exception on %s: %s", request.url, str(exc), exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"ok": False, "detail": "Внутренняя ошибка сервера. Мы уже разбираемся!"}
+    )
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    logger.warning("HTTP %d on %s: %s", exc.status_code, request.url, exc.detail)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"ok": False, "detail": exc.detail}
+    )
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -189,12 +206,25 @@ class ProfileIn(BaseModel):
     init_data: str
     name: str
     group: str
+    course: str = ""
+    default_format: str = "docx"
+    contact: str = ""
+    notes: str = ""
 
 class TaskIn(BaseModel):
     init_data: str
     subject: str
     task: str
     urgent: bool = False
+    work_type: str = "auto"
+    deadline: str = ""
+    target_grade: str = ""
+    output_format: str = "docx"
+    requirements: str = ""
+    materials: str = ""
+    use_lxp: bool = False
+    lxp_login: str = ""
+    lxp_password: str = ""
 
 class PaymentIn(BaseModel):
     init_data: str
@@ -211,7 +241,13 @@ class WorkerResultIn(BaseModel):
 async def health():
     pending = sum(1 for j in _jobs.values() if j["status"] == "pending")
     processing = sum(1 for j in _jobs.values() if j["status"] == "processing")
-    return {"ok": True, "version": "1.0", "pending": pending, "processing": processing}
+    return {
+        "ok": True, 
+        "version": "1.1", 
+        "pending": pending, 
+        "processing": processing,
+        "status": "healthy" if BOT_TOKEN else "unconfigured"
+    }
 
 @app.get("/api/subjects")
 async def subjects():
@@ -224,8 +260,14 @@ async def save_profile(body: ProfileIn):
         raise HTTPException(403, "Invalid init_data")
     uid = user["id"]
     profile = {
-        "tg_id": uid, "tg_username": user.get("username", ""),
-        "name": body.name, "group": body.group,
+        "tg_id": uid,
+        "tg_username": user.get("username", ""),
+        "name": body.name,
+        "group": body.group,
+        "course": body.course,
+        "default_format": body.default_format,
+        "contact": body.contact,
+        "notes": body.notes,
         "registered_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     save_user(uid, profile)
