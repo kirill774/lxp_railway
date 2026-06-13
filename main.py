@@ -27,9 +27,9 @@ from pydantic import BaseModel
 BOT_TOKEN     = os.getenv("BOT_TOKEN", "").strip()
 WORKER_SECRET = os.getenv("WORKER_SECRET", "").strip()
 FREE_IDS      = {int(x) for x in os.getenv("FREE_USER_IDS", "1016718472").split(",") if x.strip().isdigit()}
-PAYMENT_CARD  = os.getenv("PAYMENT_CARD", "0000 0000 0000 0000")
-PAYMENT_PHONE = os.getenv("PAYMENT_PHONE", "+7 999 000 00 00")
-PAYMENT_NAME  = os.getenv("PAYMENT_NAME", "Кирилл П.")
+PAYMENT_CARD  = os.getenv("PAYMENT_CARD", "").strip()
+PAYMENT_PHONE = os.getenv("PAYMENT_PHONE", "").strip()
+PAYMENT_NAME  = os.getenv("PAYMENT_NAME", "").strip()
 ALLOWED_ORIGINS = [
     origin.strip()
     for origin in os.getenv("ALLOWED_ORIGINS", "").split(",")
@@ -40,6 +40,8 @@ if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is required")
 if not WORKER_SECRET or WORKER_SECRET == "change-me-please":
     raise RuntimeError("WORKER_SECRET must be set to a strong secret")
+if not all([PAYMENT_CARD, PAYMENT_PHONE, PAYMENT_NAME]):
+    logger.warning("Payment contact details are incomplete; paid orders will show manual-check instructions only")
 
 PRICES = {
     "kt":         {"label": "Контрольная точка (КТ)", "rub": 500,  "stars": 390},
@@ -91,6 +93,7 @@ def build_job_response(job: dict, user: dict) -> dict:
         "amount": price,
         "stars": stars,
         "order_id": job["order_id"],
+        "status": "manual_review",
     }
     return {
         "ok": True,
@@ -124,7 +127,7 @@ def append_order_once(job: dict, user: dict) -> None:
         "urgent": job["urgent"],
         "free": free,
         "paid": free,
-        "status": "delivered",
+        "status": "delivered" if free else "awaiting_manual_payment_review",
         "created_at": job["created_at"],
         "completed_at": job.get("completed_at"),
     })
@@ -186,7 +189,6 @@ class ProfileIn(BaseModel):
     init_data: str
     name: str
     group: str
-    lxp_login: str = ""
 
 class TaskIn(BaseModel):
     init_data: str
@@ -224,7 +226,6 @@ async def save_profile(body: ProfileIn):
     profile = {
         "tg_id": uid, "tg_username": user.get("username", ""),
         "name": body.name, "group": body.group,
-        "lxp_login": body.lxp_login,
         "registered_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     save_user(uid, profile)
@@ -303,8 +304,11 @@ async def payment_confirm(body: PaymentIn):
         raise HTTPException(403, "Invalid init_data")
     for o in _orders:
         if o.get("order_id") == body.order_id and o.get("user_id") == user["id"]:
-            o["paid"] = True
-            return {"ok": True}
+            if o.get("free"):
+                return {"ok": True, "status": "free"}
+            o["payment_claimed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            o["status"] = "payment_claimed_manual_review"
+            return {"ok": True, "status": "manual_review"}
     raise HTTPException(404, "Order not found")
 
 @app.get("/api/orders")

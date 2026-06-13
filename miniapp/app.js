@@ -136,7 +136,6 @@ function showHome() {
 $('btn-register').addEventListener('click', async () => {
   const name  = $('reg-name').value.trim();
   const group = $('reg-group').value.trim();
-  const lxp   = $('reg-lxp').value.trim();
 
   if (name.length < 2)  { toast('Введи ФИО'); return; }
   if (group.length < 2) { toast('Введи группу'); return; }
@@ -145,7 +144,7 @@ $('btn-register').addEventListener('click', async () => {
   btn.disabled = true;
   btn.textContent = 'Сохраняем...';
   try {
-    const data = await api('POST', '/api/profile', { init_data: initData, name, group, lxp_login: lxp });
+    const data = await api('POST', '/api/profile', { init_data: initData, name, group });
     state.profile = data.profile;
     state.free    = tg.initDataUnsafe?.user?.id && [1016718472].includes(tg.initDataUnsafe.user.id);
     showHome();
@@ -178,7 +177,6 @@ $('btn-profile-edit').addEventListener('click', () => {
   if (state.profile) {
     $('reg-name').value  = state.profile.name  || '';
     $('reg-group').value = state.profile.group || '';
-    $('reg-lxp').value   = state.profile.lxp_login || '';
   }
   show('screen-register');
 });
@@ -319,7 +317,7 @@ function showResult(data, subject, task) {
     $('btn-paid').onclick = async () => {
       try {
         await api('POST', '/api/payment_confirm', { init_data: initData, order_id: p.order_id });
-        toast('Спасибо! Оплата на проверке ✓');
+        toast('Заявка на проверку оплаты отправлена ✓');
         payBlock.classList.add('hidden');
       } catch (e) {
         toast('Ошибка: ' + e.message);

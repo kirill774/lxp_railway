@@ -84,3 +84,12 @@ def test_submit_returns_job_and_job_endpoint_returns_worker_result_once():
     second_read = client.get(f"/api/jobs/{submitted['job_id']}", params={"init_data": init_data})
     assert second_read.status_code == 200
     assert len(main._orders) == 1
+
+    payment = client.post(
+        "/api/payment_confirm",
+        json={"init_data": init_data, "order_id": submitted["order_id"]},
+    )
+    assert payment.status_code == 200
+    assert payment.json()["status"] == "manual_review"
+    assert main._orders[0]["paid"] is False
+    assert main._orders[0]["status"] == "payment_claimed_manual_review"
