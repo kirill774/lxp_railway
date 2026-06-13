@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>LXP Задания</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+
+    <!-- Экран загрузки -->
+    <div id="screen-loading" class="screen active">
+      <div class="loader-wrap">
+        <div class="spinner"></div>
+        <p>Загрузка...</p>
+      </div>
+    </div>
+
+    <!-- Регистрация -->
+    <div id="screen-register" class="screen">
+      <div class="page-header">
+        <h1>Добро пожаловать</h1>
+        <p>Заполни профиль один раз</p>
+      </div>
+      <div class="form-body">
+        <div class="field">
+          <label>ФИО</label>
+          <input id="reg-name" type="text" placeholder="Иванов Иван Иванович" autocomplete="name">
+        </div>
+        <div class="field">
+          <label>Группа</label>
+          <input id="reg-group" type="text" placeholder="2БМ2.24">
+        </div>
+        <div class="field">
+          <label>Логин LXP <span class="optional">(необязательно)</span></label>
+          <input id="reg-lxp" type="email" placeholder="ivanov@st.ithub.ru">
+        </div>
+        <button id="btn-register" class="btn-primary">Сохранить профиль</button>
+      </div>
+    </div>
+
+    <!-- Главное меню -->
+    <div id="screen-home" class="screen">
+      <div class="page-header">
+        <div class="profile-row">
+          <div class="avatar" id="home-avatar">И</div>
+          <div>
+            <div class="profile-name" id="home-name">Загрузка...</div>
+            <div class="profile-group" id="home-group"></div>
+          </div>
+          <div id="free-badge" class="badge-free hidden">FREE</div>
+        </div>
+      </div>
+      <div class="menu-grid">
+        <button class="menu-card" id="btn-new-task">
+          <span class="menu-icon">✏️</span>
+          <span>Новое задание</span>
+        </button>
+        <button class="menu-card" id="btn-orders">
+          <span class="menu-icon">📋</span>
+          <span>Мои заказы</span>
+        </button>
+        <button class="menu-card" id="btn-prices">
+          <span class="menu-icon">💰</span>
+          <span>Цены</span>
+        </button>
+        <button class="menu-card" id="btn-profile-edit">
+          <span class="menu-icon">👤</span>
+          <span>Профиль</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Новое задание -->
+    <div id="screen-task" class="screen">
+      <div class="page-header with-back">
+        <button class="btn-back" id="task-back">←</button>
+        <h2>Новое задание</h2>
+      </div>
+      <div class="form-body">
+        <div class="field">
+          <label>Предмет</label>
+          <div class="subject-input-wrap">
+            <input id="task-subject" type="text" placeholder="Начни вводить предмет..." autocomplete="off">
+            <div id="subject-suggestions" class="suggestions hidden"></div>
+          </div>
+        </div>
+        <div class="field">
+          <label>Задание</label>
+          <textarea id="task-text" rows="5"
+            placeholder="Опиши что нужно сделать&#10;&#10;Примеры:&#10;• КТ6 Mid-Term Test&#10;• Написать Tone of Voice для кофейни&#10;• Аудит контент-стратегии Instagram"></textarea>
+        </div>
+        <div class="price-row" id="price-row">
+          <div class="price-info">
+            <span id="price-type-label">Определяю тип...</span>
+            <span class="price-amount" id="price-amount"></span>
+          </div>
+          <label class="toggle-row">
+            <span>⚡ Срочно (+50%)</span>
+            <input type="checkbox" id="urgent-toggle">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <button id="btn-submit" class="btn-primary" disabled>Выполнить</button>
+      </div>
+    </div>
+
+    <!-- Экран выполнения -->
+    <div id="screen-processing" class="screen">
+      <div class="loader-wrap">
+        <div class="spinner big"></div>
+        <h3>Выполняю задание...</h3>
+        <p id="processing-subject"></p>
+        <div class="processing-timer">
+          <span id="timer-seconds">0</span> сек
+        </div>
+      </div>
+    </div>
+
+    <!-- Результат -->
+    <div id="screen-result" class="screen">
+      <div class="page-header with-back">
+        <button class="btn-back" id="result-back">←</button>
+        <h2>Готово!</h2>
+      </div>
+      <div class="result-body">
+        <div class="result-meta" id="result-meta"></div>
+        <div class="result-text" id="result-text"></div>
+        <div id="payment-block" class="payment-block hidden">
+          <h3>Оплата</h3>
+          <div class="payment-amount" id="payment-amount"></div>
+          <div class="payment-details" id="payment-details"></div>
+          <button id="btn-paid" class="btn-primary">✅ Я оплатил</button>
+        </div>
+        <button id="btn-new-after" class="btn-secondary">➕ Новое задание</button>
+      </div>
+    </div>
+
+    <!-- Заказы -->
+    <div id="screen-orders" class="screen">
+      <div class="page-header with-back">
+        <button class="btn-back" id="orders-back">←</button>
+        <h2>Мои заказы</h2>
+      </div>
+      <div id="orders-list" class="orders-list"></div>
+    </div>
+
+    <!-- Цены -->
+    <div id="screen-prices" class="screen">
+      <div class="page-header with-back">
+        <button class="btn-back" id="prices-back">←</button>
+        <h2>Цены</h2>
+      </div>
+      <div id="prices-list" class="prices-list"></div>
+    </div>
+
+    <!-- Тост -->
+    <div id="toast" class="toast hidden"></div>
+
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
