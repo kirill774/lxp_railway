@@ -14,7 +14,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote
+from urllib.parse import parse_qsl
 
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,18 +25,28 @@ from pydantic import BaseModel
 # ─── Config ───────────────────────────────────────────────────────────────────
 
 BOT_TOKEN     = os.getenv("BOT_TOKEN", "").strip()
-WORKER_SECRET = os.getenv("WORKER_SECRET", "change-me-please").strip()
+WORKER_SECRET = os.getenv("WORKER_SECRET", "").strip()
 FREE_IDS      = {int(x) for x in os.getenv("FREE_USER_IDS", "1016718472").split(",") if x.strip().isdigit()}
 PAYMENT_CARD  = os.getenv("PAYMENT_CARD", "0000 0000 0000 0000")
 PAYMENT_PHONE = os.getenv("PAYMENT_PHONE", "+7 999 000 00 00")
 PAYMENT_NAME  = os.getenv("PAYMENT_NAME", "Кирилл П.")
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("ALLOWED_ORIGINS", "").split(",")
+    if origin.strip()
+]
+
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN is required")
+if not WORKER_SECRET or WORKER_SECRET == "change-me-please":
+    raise RuntimeError("WORKER_SECRET must be set to a strong secret")
 
 PRICES = {
-    "kt":         {"label": "Контрольная точка (КТ)", "rub": 300},
-    "practice":   {"label": "Практическая работа",    "rub": 350},
-    "essay":      {"label": "Реферат / эссе",          "rub": 450},
-    "project":    {"label": "Проектная работа",        "rub": 600},
-    "assignment": {"label": "Задание",                 "rub": 400},
+    "kt":         {"label": "Контрольная точка (КТ)", "rub": 500,  "stars": 390},
+    "practice":   {"label": "Практическая работа",    "rub": 700,  "stars": 540},
+    "essay":      {"label": "Реферат / эссе",          "rub": 900,  "stars": 695},
+    "project":    {"label": "Проектная работа",        "rub": 1500, "stars": 1155},
+    "assignment": {"label": "Задание",                 "rub": 600,  "stars": 465},
 }
 
 SUBJECTS = [
@@ -83,20 +93,22 @@ def detect_type(task: str) -> str:
     if re.search(r'\bkt\b', t) or re.search(r'\bтест\b', t): return "kt"
     return "assignment"
 
-def calc_price(task: str, urgent: bool = False) -> tuple[str, int]:
+def calc_price(task: str, urgent: bool = False) -> tuple[str, int, int]:
     ptype = detect_type(task)
-    price = PRICES[ptype]["rub"]
-    if urgent: price = int(price * 1.5)
-    return ptype, price
+    rub   = PRICES[ptype]["rub"]
+    stars = PRICES[ptype]["stars"]
+    if urgent:
+        rub   = int(rub   * 1.5)
+        stars = int(stars * 1.5)
+    return ptype, rub, stars
 
 def validate_init_data(init_data: str) -> dict | None:
     try:
-        parsed = {}
-        for part in init_data.split("&"):
-            if "=" in part:
-                k, v = part.split("=", 1)
-                parsed[k] = unquote(v)
+        parsed = dict(parse_qsl(init_data, keep_blank_values=True, strict_parsing=True))
         received_hash = parsed.pop("hash", "")
+        auth_date = int(parsed.get("auth_date", "0") or "0")
+        if not received_hash or not auth_date or time.time() - auth_date > 86400:
+            return None
         data_check = "\n".join(f"{k}={v}" for k, v in sorted(parsed.items()))
         secret = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
         expected = hmac.new(secret, data_check.encode(), hashlib.sha256).hexdigest()
@@ -112,7 +124,12 @@ def worker_auth(secret: str) -> bool:
 # ─── FastAPI ──────────────────────────────────────────────────────────────────
 
 app = FastAPI(title="LXP Railway API")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "X-Worker-Secret"],
+)
 
 # ─── Pydantic ─────────────────────────────────────────────────────────────────
 
@@ -179,8 +196,8 @@ async def get_profile(init_data: str):
 
 @app.post("/api/estimate")
 async def estimate(body: dict):
-    ptype, price = calc_price(body.get("task",""), body.get("urgent", False))
-    return {"type": ptype, "label": PRICES[ptype]["label"], "price": price}
+    ptype, price, stars = calc_price(body.get("task",""), body.get("urgent", False))
+    return {"type": ptype, "label": PRICES[ptype]["label"], "price": price, "stars": stars}
 
 @app.post("/api/submit")
 async def submit_task(body: TaskIn):
@@ -192,7 +209,7 @@ async def submit_task(body: TaskIn):
     profile = get_user(uid) or {"name": user.get("first_name",""), "group": ""}
     free = uid in FREE_IDS
     task = f"{body.subject}\n{body.task}".strip()
-    ptype, price = calc_price(task, body.urgent)
+    ptype, price, stars = calc_price(task, body.urgent)
 
     job_id = str(uuid.uuid4())[:16]
     order_id = f"ord_{int(time.time())}_{uid}"
@@ -228,18 +245,20 @@ async def submit_task(body: TaskIn):
                 "name": profile["name"], "group": profile.get("group",""),
                 "subject": body.subject, "task": body.task[:200],
                 "price": 0 if free else price,
+                "stars": 0 if free else stars,
                 "urgent": body.urgent, "free": free, "paid": free,
                 "status": "delivered",
                 "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             })
             payment = None if free else {
                 "card": PAYMENT_CARD, "phone": PAYMENT_PHONE,
-                "name": PAYMENT_NAME, "amount": price, "order_id": order_id,
+                "name": PAYMENT_NAME, "amount": price, "stars": stars, "order_id": order_id,
             }
             return {
                 "ok": True, "answer": answer,
                 "order_id": order_id,
                 "price": 0 if free else price,
+                "stars": 0 if free else stars,
                 "free": free, "payment": payment,
             }
         elif job.get("status") == "error":

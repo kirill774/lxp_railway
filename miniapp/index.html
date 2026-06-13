@@ -10,10 +10,10 @@
 <body>
   <div id="app">
 
-    <!-- Экран загрузки -->
+    <!-- Загрузка -->
     <div id="screen-loading" class="screen active">
       <div class="loader-wrap">
-        <div class="spinner"></div>
+        <div class="spinner big"></div>
         <p>Загрузка...</p>
       </div>
     </div>
@@ -22,7 +22,7 @@
     <div id="screen-register" class="screen">
       <div class="page-header">
         <h1>Добро пожаловать</h1>
-        <p>Заполни профиль один раз</p>
+        <p>Заполни профиль один раз — и поехали</p>
       </div>
       <div class="form-body">
         <div class="field">
@@ -43,9 +43,10 @@
 
     <!-- Главное меню -->
     <div id="screen-home" class="screen">
+      <div class="hero-blob"></div>
       <div class="page-header">
         <div class="profile-row">
-          <div class="avatar" id="home-avatar">И</div>
+          <div class="avatar" id="home-avatar">А</div>
           <div>
             <div class="profile-name" id="home-name">Загрузка...</div>
             <div class="profile-group" id="home-group"></div>
@@ -53,8 +54,22 @@
           <div id="free-badge" class="badge-free hidden">FREE</div>
         </div>
       </div>
+      <div class="stats-bar">
+        <div class="stat-card">
+          <div class="stat-value">AI</div>
+          <div class="stat-label">Модель</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value">⭐</div>
+          <div class="stat-label">Stars оплата</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value">.docx</div>
+          <div class="stat-label">Формат</div>
+        </div>
+      </div>
       <div class="menu-grid">
-        <button class="menu-card" id="btn-new-task">
+        <button class="menu-card highlight" id="btn-new-task">
           <span class="menu-icon">✏️</span>
           <span>Новое задание</span>
         </button>
@@ -94,8 +109,11 @@
         </div>
         <div class="price-row" id="price-row">
           <div class="price-info">
-            <span id="price-type-label">Определяю тип...</span>
-            <span class="price-amount" id="price-amount"></span>
+            <span id="price-type-label">Введи задание</span>
+            <div class="price-info-col">
+              <span class="price-amount" id="price-amount"></span>
+              <span class="price-rub" id="price-rub"></span>
+            </div>
           </div>
           <label class="toggle-row">
             <span>⚡ Срочно (+50%)</span>
@@ -103,19 +121,18 @@
             <span class="toggle-slider"></span>
           </label>
         </div>
-        <button id="btn-submit" class="btn-primary" disabled>Выполнить</button>
+        <button id="btn-submit" class="btn-primary" disabled>Выполнить задание</button>
       </div>
     </div>
 
-    <!-- Экран выполнения -->
+    <!-- Обработка -->
     <div id="screen-processing" class="screen">
       <div class="loader-wrap">
         <div class="spinner big"></div>
         <h3>Выполняю задание...</h3>
         <p id="processing-subject"></p>
-        <div class="processing-timer">
-          <span id="timer-seconds">0</span> сек
-        </div>
+        <div class="processing-timer" id="timer-seconds">0</div>
+        <p>секунд</p>
       </div>
     </div>
 
@@ -129,7 +146,7 @@
         <div class="result-meta" id="result-meta"></div>
         <div class="result-text" id="result-text"></div>
         <div id="payment-block" class="payment-block hidden">
-          <h3>Оплата</h3>
+          <h3>💳 Оплата</h3>
           <div class="payment-amount" id="payment-amount"></div>
           <div class="payment-details" id="payment-details"></div>
           <button id="btn-paid" class="btn-primary">✅ Я оплатил</button>

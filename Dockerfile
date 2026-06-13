@@ -2,14 +2,14 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY requirements_railway.txt .
-RUN pip install --no-cache-dir -r requirements_railway.txt
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Копируем Mini App статику
 COPY miniapp/ ./miniapp/
 
 # Копируем бэкенд
-COPY railway/main.py .
+COPY main.py .
 
 EXPOSE 8000
 
