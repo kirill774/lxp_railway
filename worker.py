@@ -83,62 +83,55 @@ async def lxp_find_task(login: str, password: str, subject: str, task_name: str)
             browser = await p.chromium.launch(headless=LXP_HEADLESS)
             context = await browser.new_context(
                 locale="ru-RU",
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 storage_state=None,
             )
             page = await context.new_page()
 
             try:
                 # 1. Логин
-                await page.goto(f"{LXP_URL}/sign-in", wait_until="networkidle", timeout=30000)
-                await page.fill("input[type='email'], input[type='text']", login)
-                await page.fill("input[type='password']", password)
-                await page.click("button[type='submit'], button:has-text('Войти'), button:has-text('войти')")
-                await page.wait_for_url(f"{LXP_URL}/dashboard", timeout=15000)
+                await page.goto(f"{LXP_URL}/sign-in", wait_until="commit", timeout=60000)
+                await page.wait_for_selector("[data-testid='loginEmailInput']", timeout=30000)
+                try:
+                    await page.click("[data-testid='cookieAgreeButton']", timeout=5000)
+                except Exception:
+                    pass
+                await page.fill("[data-testid='loginEmailInput']", login)
+                await page.fill("[data-testid='loginPasswordInput']", password)
+                await page.click("[data-testid='loginSubmitButton']")
+                await asyncio.sleep(12)
+                if "sign-in" in page.url:
+                    raise RuntimeError("LXP login failed: still on sign-in")
                 logger.info("LXP: logged in successfully")
 
-                # 2. Переходим к заданиям
-                await page.goto(f"{LXP_URL}/tasks", wait_until="networkidle", timeout=20000)
-                await asyncio.sleep(2)
+                # 2. Ищем ссылки на задания на dashboard
+                if "dashboard" not in page.url:
+                    await page.goto(f"{LXP_URL}/dashboard", wait_until="domcontentloaded", timeout=20000)
+                await asyncio.sleep(12)
 
                 # 3. Ищем задание по названию предмета и задания
-                # Пробуем найти ссылку содержащую название предмета или задания
-                task_link = None
+                task_href = await page.evaluate(
+                    """
+                    ({ subject, taskName }) => {
+                        const subjectNeedle = (subject || '').toLowerCase().slice(0, 10);
+                        const taskNeedle = (taskName || '').toLowerCase().slice(0, 15);
+                        const links = Array.from(document.querySelectorAll('a[href*="/tasks/"]'));
+                        const scored = links.map((link, index) => {
+                            const text = (link.innerText || link.textContent || '').trim().toLowerCase();
+                            let score = 0;
+                            if (taskNeedle && text.includes(taskNeedle)) score += 2;
+                            if (subjectNeedle && text.includes(subjectNeedle)) score += 1;
+                            return { href: link.href, score, index };
+                        }).filter(item => item.href);
+                        scored.sort((left, right) => right.score - left.score || left.index - right.index);
+                        return scored[0]?.href || '';
+                    }
+                    """,
+                    {"subject": subject, "taskName": task_name},
+                )
 
-                # Сначала пробуем точное совпадение по тексту задания
-                for selector in [
-                    f"a:has-text('{task_name[:30]}')",
-                    f"a:has-text('{subject[:20]}')",
-                    "[class*='task'] a",
-                    "[class*='assignment'] a",
-                ]:
-                    try:
-                        elements = await page.query_selector_all(selector)
-                        if elements:
-                            # Берём первый подходящий
-                            for el in elements:
-                                text = (await el.text_content() or "").strip()
-                                if (task_name[:15].lower() in text.lower() or
-                                    subject[:10].lower() in text.lower()):
-                                    task_link = el
-                                    break
-                            if task_link:
-                                break
-                    except Exception:
-                        continue
-
-                # Если не нашли — берём первый элемент с заданием
-                if not task_link:
-                    logger.warning("LXP: exact match not found, trying first available task link")
-                    try:
-                        task_link = await page.query_selector("[class*='task'] a, [class*='assignment'] a, main a[href*='task']")
-                    except Exception:
-                        pass
-
-                if task_link:
-                    await task_link.click()
-                    await page.wait_for_load_state("networkidle", timeout=15000)
-                    await asyncio.sleep(1)
+                if task_href:
+                    await page.goto(task_href, wait_until="domcontentloaded", timeout=60000)
+                    await asyncio.sleep(5)
 
                     # 4. Парсим содержимое ТЗ
                     tz_text = await page.evaluate("""
