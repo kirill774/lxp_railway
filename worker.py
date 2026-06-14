@@ -32,7 +32,7 @@ if _env_file.exists():
         line = line.strip()
         if line and not line.startswith("#") and "=" in line:
             k, _, v = line.partition("=")
-            os.environ.setdefault(k.strip(), v.strip())
+            os.environ[k.strip()] = v.strip()
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 RAILWAY_URL    = os.getenv("RAILWAY_URL", "http://127.0.0.1:8000").rstrip("/")
