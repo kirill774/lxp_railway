@@ -141,6 +141,8 @@ $('btn-register').addEventListener('click', async () => {
   const level = $('reg-level').value;
   const tone  = $('reg-tone').value;
   const fmt   = $('reg-format').value;
+  const lxpLogin = $('reg-lxp-login').value.trim();
+  const lxpPassword = $('reg-lxp-password').value.trim();
 
   if (name.length < 2)  { toast('Введи ФИО'); return; }
   if (group.length < 2) { toast('Введи группу'); return; }
@@ -149,7 +151,7 @@ $('btn-register').addEventListener('click', async () => {
   btn.disabled = true;
   btn.textContent = 'Сохраняем...';
   try {
-    const data = await api('POST', '/api/profile', { init_data: initData, name, group, academic_level: level, tone: tone, preferred_format: fmt });
+    const data = await api('POST', '/api/profile', { init_data: initData, name, group, academic_level: level, tone: tone, preferred_format: fmt, lxp_login: lxpLogin, lxp_password: lxpPassword });
     state.profile = data.profile;
     state.free    = tg.initDataUnsafe?.user?.id && [1016718472].includes(tg.initDataUnsafe.user.id);
     showHome();
@@ -162,6 +164,10 @@ $('btn-register').addEventListener('click', async () => {
   }
 });
 
+$('reg-lxp-enable').addEventListener('change', () => {
+  $('lxp-creds').classList.toggle('hidden', !$('reg-lxp-enable').checked);
+});
+
 // ─── Home buttons ─────────────────────────────────────────────────────────────
 
 $('btn-new-task').addEventListener('click', () => {
@@ -172,6 +178,9 @@ $('btn-new-task').addEventListener('click', () => {
   $('price-amount').textContent = '';
   $('price-rub').textContent    = '';
   $('price-type-label').textContent = 'Введи задание';
+  if ($('lxp-toggle-row')) {
+    $('lxp-toggle-row').classList.toggle('hidden', !state.profile?.lxp_login);
+  }
   show('screen-task');
 });
 
@@ -185,6 +194,10 @@ $('btn-profile-edit').addEventListener('click', () => {
     $('reg-level').value = state.profile.academic_level || 'bachelor';
     $('reg-tone').value  = state.profile.tone || 'formal';
     $('reg-format').value = state.profile.preferred_format || 'docx';
+    $('reg-lxp-enable').checked = !!(state.profile.lxp_login);
+    $('lxp-creds').classList.toggle('hidden', !state.profile.lxp_login);
+    $('reg-lxp-login').value = state.profile.lxp_login || '';
+    // Do NOT restore password — user must re-enter
   }
   show('screen-register');
 });
@@ -264,6 +277,7 @@ $('btn-submit').addEventListener('click', async () => {
   const subject = subjectInput.value.trim();
   const task    = $('task-text').value.trim();
   const urgent  = $('urgent-toggle').checked;
+  const useLxp  = $('use-lxp-toggle').checked;
 
   if (!subject) { toast('Введи предмет'); return; }
   if (task.length < 5) { toast('Слишком короткое задание'); return; }
@@ -280,7 +294,7 @@ $('btn-submit').addEventListener('click', async () => {
   }, 1000);
 
   try {
-    const submitted = await api('POST', '/api/submit', { init_data: initData, subject, task, urgent });
+    const submitted = await api('POST', '/api/submit', { init_data: initData, subject, task, urgent, use_lxp: useLxp });
     const data = submitted.status === 'done'
       ? submitted
       : await waitForJob(submitted.job_id);

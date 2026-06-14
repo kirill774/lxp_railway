@@ -58,6 +58,24 @@
           </select>
         </div>
         <button id="btn-register" class="btn-primary">Сохранить профиль</button>
+        <div class="field lxp-section">
+          <label class="toggle-row">
+            <span>🎓 Подключить LXP (автопоиск ТЗ)</span>
+            <input type="checkbox" id="reg-lxp-enable">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div id="lxp-creds" class="hidden">
+          <div class="field">
+            <label>Логин LXP (email)</label>
+            <input id="reg-lxp-login" type="email" placeholder="example@st.ithub.ru" autocomplete="email">
+          </div>
+          <div class="field">
+            <label>Пароль LXP</label>
+            <input id="reg-lxp-password" type="password" placeholder="••••••••" autocomplete="current-password">
+          </div>
+          <div class="lxp-note">🔒 Пароль хранится только в памяти. Не передаётся в Notion или логи.</div>
+        </div>
       </div>
     </div>
 
@@ -141,6 +159,11 @@
             <span class="toggle-slider"></span>
           </label>
         </div>
+        <label class="toggle-row" id="lxp-toggle-row">
+          <span>🎓 Найти ТЗ на LXP автоматически</span>
+          <input type="checkbox" id="use-lxp-toggle">
+          <span class="toggle-slider"></span>
+        </label>
         <button id="btn-submit" class="btn-primary" disabled>Выполнить задание</button>
       </div>
     </div>

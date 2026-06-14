@@ -135,6 +135,7 @@ def build_job_response(job: dict, user: dict) -> dict:
         "created_at": job["created_at"],
         "completed_at": job.get("completed_at"),
         "output_format": job.get("output_format", "docx"),
+        "use_lxp": job.get("use_lxp", False),
     }
 
 def append_order_once(job: dict, user: dict) -> None:
@@ -601,6 +602,8 @@ class ProfileIn(BaseModel):
     academic_level: str = "bachelor"
     tone: str = "formal"
     preferred_format: str = "docx"
+    lxp_login: str = ""
+    lxp_password: str = ""
 
 class TaskIn(BaseModel):
     init_data: str
@@ -665,6 +668,8 @@ async def save_profile(body: ProfileIn):
         "academic_level": body.academic_level,
         "tone": body.tone,
         "preferred_format": body.preferred_format,
+        "lxp_login": body.lxp_login,
+        "lxp_password": body.lxp_password,
         "registered_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     save_user(uid, profile)
@@ -722,6 +727,9 @@ async def submit_task(body: TaskIn):
         "output_format": body.output_format,
         "academic_level": profile.get("academic_level", "bachelor"),
         "tone": profile.get("tone", "formal"),
+        "use_lxp": body.use_lxp,
+        "lxp_login": profile.get("lxp_login", "") if body.use_lxp else "",
+        "lxp_password": profile.get("lxp_password", "") if body.use_lxp else "",
     }
 
     logger.info("Job %s created for user %s: %s", job_id, uid, task[:60])
