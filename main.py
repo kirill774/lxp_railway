@@ -16,10 +16,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl
 
+import io
+
 import httpx
 from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -43,6 +45,23 @@ ALLOWED_ORIGINS = [
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger("railway")
+
+# ─── In-memory log buffer (last 200 entries) ──────────────────────────────────
+import collections
+_log_buffer: collections.deque = collections.deque(maxlen=200)
+
+class _DequeHandler(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        _log_buffer.append({
+            "ts": self.formatter.formatTime(record) if self.formatter else record.asctime,
+            "level": record.levelname,
+            "msg": record.getMessage(),
+        })
+
+_dh = _DequeHandler()
+_dh.setFormatter(logging.Formatter("%(asctime)s"))
+logging.getLogger("railway").addHandler(_dh)
+logging.getLogger("uvicorn.access").addHandler(_dh)
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is required")
@@ -324,6 +343,224 @@ def validate_init_data(init_data: str) -> dict | None:
 def worker_auth(secret: str) -> bool:
     return hmac.compare_digest(secret, WORKER_SECRET)
 
+# ─── File Generation ──────────────────────────────────────────────────────────
+
+def _md_to_paragraphs(text: str) -> list[dict]:
+    """Parse markdown text into list of {type, text, level} dicts."""
+    result = []
+    for line in text.split('\n'):
+        line = line.rstrip()
+        if not line:
+            continue
+        m = re.match(r'^(#{1,3})\s+(.*)', line)
+        if m:
+            result.append({"type": "heading", "level": len(m.group(1)), "text": m.group(2)})
+        elif line.startswith('- ') or line.startswith('• '):
+            result.append({"type": "bullet", "text": line[2:]})
+        elif re.match(r'^\d+\.\s', line):
+            result.append({"type": "numbered", "text": re.sub(r'^\d+\.\s', '', line)})
+        else:
+            result.append({"type": "paragraph", "text": line})
+    return result
+
+def generate_docx(title: str, subject: str, text: str, author: str = "", tone: str = "formal") -> bytes:
+    from docx import Document
+    from docx.shared import Pt, RGBColor, Inches
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    doc = Document()
+
+    for section in doc.sections:
+        section.top_margin = Inches(1)
+        section.bottom_margin = Inches(1)
+        section.left_margin = Inches(1.2)
+        section.right_margin = Inches(1.2)
+
+    t = doc.add_heading(title, level=0)
+    t.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    if t.runs:
+        t.runs[0].font.color.rgb = RGBColor(0x1a, 0x1a, 0x2e)
+
+    meta = doc.add_paragraph()
+    meta.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = meta.add_run(f"Предмет: {subject}")
+    run.font.size = Pt(10)
+    run.font.color.rgb = RGBColor(0x88, 0x88, 0x88)
+    if author:
+        run2 = meta.add_run(f"  |  Автор: {author}")
+        run2.font.size = Pt(10)
+        run2.font.color.rgb = RGBColor(0x88, 0x88, 0x88)
+
+    doc.add_paragraph()
+
+    paragraphs = _md_to_paragraphs(text)
+    for p in paragraphs:
+        if p["type"] == "heading":
+            doc.add_heading(p["text"], level=p["level"])
+        elif p["type"] == "bullet":
+            doc.add_paragraph(p["text"], style='List Bullet')
+        elif p["type"] == "numbered":
+            doc.add_paragraph(p["text"], style='List Number')
+        else:
+            para = doc.add_paragraph(p["text"])
+            para.paragraph_format.space_after = Pt(6)
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def generate_txt(title: str, subject: str, text: str, author: str = "") -> bytes:
+    lines = [title, "=" * len(title), f"Предмет: {subject}"]
+    if author:
+        lines.append(f"Автор: {author}")
+    lines.extend(["", text])
+    return "\n".join(lines).encode("utf-8")
+
+
+def generate_pptx(title: str, subject: str, text: str, author: str = "") -> bytes:
+    from pptx import Presentation
+    from pptx.util import Inches, Pt
+    from pptx.dml.color import RGBColor
+    from pptx.enum.text import PP_ALIGN
+
+    prs = Presentation()
+    prs.slide_width = Inches(13.33)
+    prs.slide_height = Inches(7.5)
+
+    DARK = RGBColor(0x1a, 0x1a, 0x2e)
+    ACCENT = RGBColor(0x4f, 0x8a, 0xff)
+
+    def add_slide(layout_idx=6):
+        layout = prs.slide_layouts[layout_idx] if layout_idx < len(prs.slide_layouts) else prs.slide_layouts[6]
+        return prs.slides.add_slide(layout)
+
+    def add_textbox(slide, text, left, top, width, height, size=18, bold=False, color=None, align=PP_ALIGN.LEFT):
+        txBox = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height))
+        tf = txBox.text_frame
+        tf.word_wrap = True
+        p = tf.paragraphs[0]
+        p.alignment = align
+        run = p.add_run()
+        run.text = text
+        run.font.size = Pt(size)
+        run.font.bold = bold
+        if color:
+            run.font.color.rgb = color
+        return txBox
+
+    slide0 = add_slide(0) if len(prs.slide_layouts) > 0 else add_slide(6)
+    try:
+        slide0.shapes.title.text = title
+        slide0.placeholders[1].text = f"{subject}" + (f"\n{author}" if author else "")
+    except Exception:
+        add_textbox(slide0, title, 1, 2.5, 11, 1.5, size=36, bold=True, color=DARK, align=PP_ALIGN.CENTER)
+        add_textbox(slide0, subject, 1, 4.2, 11, 0.8, size=20, color=ACCENT, align=PP_ALIGN.CENTER)
+
+    paragraphs = _md_to_paragraphs(text)
+    chunks = []
+    current_chunk = []
+    current_heading = title
+
+    for p in paragraphs:
+        if p["type"] == "heading" and p["level"] <= 2:
+            if current_chunk:
+                chunks.append((current_heading, current_chunk))
+            current_heading = p["text"]
+            current_chunk = []
+        else:
+            current_chunk.append(p)
+            if len(current_chunk) >= 6:
+                chunks.append((current_heading, current_chunk))
+                current_chunk = []
+                current_heading = current_heading + " (продолжение)"
+
+    if current_chunk:
+        chunks.append((current_heading, current_chunk))
+
+    for slide_title, items in chunks:
+        slide = add_slide(6)
+        add_textbox(slide, slide_title, 0.5, 0.3, 12, 1, size=28, bold=True, color=DARK)
+        y = 1.5
+        for item in items:
+            prefix = "• " if item["type"] == "bullet" else ""
+            add_textbox(slide, prefix + item["text"], 0.7, y, 11.5, 0.6, size=16, color=DARK)
+            y += 0.65
+            if y > 6.5:
+                break
+
+    buf = io.BytesIO()
+    prs.save(buf)
+    return buf.getvalue()
+
+
+def generate_xlsx(title: str, subject: str, text: str, author: str = "") -> bytes:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = subject[:31]
+
+    HEADER_FILL = PatternFill("solid", fgColor="1a1a2e")
+    HEADER_FONT = Font(bold=True, color="FFFFFF", size=12)
+    TITLE_FONT  = Font(bold=True, size=14, color="1a1a2e")
+    ACCENT_FILL = PatternFill("solid", fgColor="e8f0fe")
+    thin = Side(style="thin", color="cccccc")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    ws.column_dimensions['A'].width = 12
+    ws.column_dimensions['B'].width = 80
+
+    ws.merge_cells('A1:B1')
+    ws['A1'] = title
+    ws['A1'].font = TITLE_FONT
+    ws['A1'].alignment = Alignment(horizontal='center', vertical='center')
+    ws.row_dimensions[1].height = 30
+
+    ws['A2'] = 'Предмет'
+    ws['B2'] = subject
+    ws['A2'].font = Font(bold=True, color="4f8aff")
+    if author:
+        ws['A3'] = 'Автор'
+        ws['B3'] = author
+        ws['A3'].font = Font(bold=True, color="4f8aff")
+
+    row = 4
+    ws.cell(row=row, column=1, value='Тип').font = HEADER_FONT
+    ws.cell(row=row, column=1).fill = HEADER_FILL
+    ws.cell(row=row, column=2, value='Содержание').font = HEADER_FONT
+    ws.cell(row=row, column=2).fill = HEADER_FILL
+    ws.row_dimensions[row].height = 22
+
+    paragraphs = _md_to_paragraphs(text)
+    for i, p in enumerate(paragraphs):
+        row += 1
+        type_label = {"heading": "Заголовок", "bullet": "• Пункт", "numbered": "№ Пункт", "paragraph": "Текст"}.get(p["type"], "")
+        c1 = ws.cell(row=row, column=1, value=type_label)
+        c2 = ws.cell(row=row, column=2, value=p["text"])
+        c1.border = border
+        c2.border = border
+        c2.alignment = Alignment(wrap_text=True)
+        if p["type"] == "heading":
+            c1.font = Font(bold=True, color="4f8aff")
+            c2.font = Font(bold=True)
+            c2.fill = ACCENT_FILL
+        if i % 2 == 0 and p["type"] != "heading":
+            c2.fill = PatternFill("solid", fgColor="f8f9ff")
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+FORMAT_GENERATORS = {
+    "docx": (generate_docx, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".docx"),
+    "pptx": (generate_pptx, "application/vnd.openxmlformats-officedocument.presentationml.presentation", ".pptx"),
+    "xlsx": (generate_xlsx, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xlsx"),
+    "txt":  (generate_txt,  "text/plain; charset=utf-8", ".txt"),
+}
+
 # ─── FastAPI ──────────────────────────────────────────────────────────────────
 
 app = FastAPI(title="LXP Railway API")
@@ -523,6 +760,46 @@ async def orders(init_data: str):
         raise HTTPException(403, "Invalid init_data")
     return {"ok": True, "orders": get_user_orders(user["id"])}
 
+@app.get("/api/jobs/{job_id}/download")
+async def download_job_file(job_id: str, init_data: str, fmt: str = ""):
+    user = validate_init_data(init_data)
+    if not user:
+        raise HTTPException(403, "Invalid init_data")
+    job = _jobs.get(job_id)
+    if not job or job.get("user_id") != user["id"]:
+        raise HTTPException(404, "Job not found")
+    if job["status"] != "done" or not job.get("result"):
+        raise HTTPException(400, "Job not ready")
+
+    output_fmt = fmt or job.get("output_format", "docx")
+    if output_fmt not in FORMAT_GENERATORS:
+        output_fmt = "docx"
+
+    profile = get_user(user["id"]) or {}
+    gen_fn, mime, ext = FORMAT_GENERATORS[output_fmt]
+
+    title = job.get("subject", "Задание")
+    author = profile.get("name", "")
+    tone = job.get("tone", "formal")
+
+    try:
+        if output_fmt == "docx":
+            file_bytes = gen_fn(title, job["subject"], job["result"], author, tone)
+        else:
+            file_bytes = gen_fn(title, job["subject"], job["result"], author)
+    except Exception as exc:
+        logger.error("File generation failed for job %s fmt %s: %s", job_id, output_fmt, exc)
+        raise HTTPException(500, f"Ошибка генерации файла: {exc}")
+
+    safe_title = re.sub(r'[^\w\s-]', '', title)[:40].strip().replace(' ', '_')
+    filename = f"{safe_title}{ext}"
+
+    return StreamingResponse(
+        io.BytesIO(file_bytes),
+        media_type=mime,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
 # ─── Worker API (защищён WORKER_SECRET) ──────────────────────────────────────
 
 @app.get("/worker/jobs")
@@ -568,6 +845,13 @@ async def worker_status(x_worker_secret: str = Header(...)):
         "users":           len(_users),
         "orders":          len(_orders),
     }
+
+@app.get("/worker/logs")
+async def worker_logs(x_worker_secret: str = Header(...), n: int = 50):
+    if not worker_auth(x_worker_secret):
+        raise HTTPException(403, "Invalid worker secret")
+    entries = list(_log_buffer)[-n:]
+    return {"ok": True, "count": len(entries), "logs": entries}
 
 # ─── Static (Mini App) ────────────────────────────────────────────────────────
 

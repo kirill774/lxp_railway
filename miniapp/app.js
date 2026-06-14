@@ -310,6 +310,25 @@ function showResult(data, subject, task) {
 
   $('result-text').innerHTML = markdownToHtml(data.answer);
 
+  // Download buttons
+  const dlBtns = $('download-btns');
+  dlBtns.innerHTML = '';
+  const formats = [
+    { fmt: 'docx', label: '📄 Word' },
+    { fmt: 'pptx', label: '📊 PowerPoint' },
+    { fmt: 'xlsx', label: '📋 Excel' },
+    { fmt: 'txt',  label: '📝 TXT' },
+  ];
+  const encoded = encodeURIComponent(initData);
+  formats.forEach(({ fmt, label }) => {
+    const a = document.createElement('a');
+    a.className = 'btn-download';
+    a.textContent = label;
+    a.href = `/api/jobs/${encodeURIComponent(data.job_id)}/download?init_data=${encoded}&fmt=${fmt}`;
+    a.download = '';
+    dlBtns.appendChild(a);
+  });
+
   const payBlock = $('payment-block');
   if (data.payment) {
     const p = data.payment;
