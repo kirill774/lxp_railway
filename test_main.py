@@ -93,3 +93,100 @@ def test_submit_returns_job_and_job_endpoint_returns_worker_result_once():
     assert payment.json()["status"] == "manual_review"
     assert main._orders[0]["paid"] is False
     assert main._orders[0]["status"] == "payment_claimed_manual_review"
+
+
+def test_profile_saves_academic_level_and_tone():
+    main._jobs.clear()
+    main._users.clear()
+    client = TestClient(main.app)
+    user = {"id": 333, "first_name": "Анна", "username": "anna333"}
+    init_data = make_init_data(user)
+
+    response = client.post(
+        "/api/profile",
+        json={
+            "init_data": init_data,
+            "name": "Анна Смирнова",
+            "group": "3БМ1.24",
+            "academic_level": "master",
+            "tone": "casual",
+            "preferred_format": "pptx",
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    profile = payload["profile"]
+    assert profile["academic_level"] == "master"
+    assert profile["tone"] == "casual"
+    assert profile["preferred_format"] == "pptx"
+
+
+def test_submit_job_contains_output_format_and_tone():
+    main._jobs.clear()
+    main._users.clear()
+    client = TestClient(main.app)
+    user = {"id": 444, "first_name": "Test", "username": "test444"}
+    init_data = make_init_data(user)
+
+    client.post(
+        "/api/profile",
+        json={
+            "init_data": init_data,
+            "name": "Test User",
+            "group": "1А1.24",
+            "academic_level": "college",
+            "tone": "neutral",
+            "preferred_format": "docx",
+        },
+    )
+
+    submit = client.post(
+        "/api/submit",
+        json={
+            "init_data": init_data,
+            "subject": "SMM",
+            "task": "Тестовое задание",
+            "urgent": False,
+            "output_format": "txt",
+        },
+    )
+    assert submit.status_code == 200
+    submitted = submit.json()
+    assert submitted["output_format"] == "txt"
+
+    job_id = submitted["job_id"]
+    job_entry = main._jobs[job_id]
+    assert job_entry["academic_level"] == "college"
+    assert job_entry["tone"] == "neutral"
+    assert job_entry["output_format"] == "txt"
+
+
+def test_worker_gets_job_with_metadata():
+    main._jobs.clear()
+    main._users.clear()
+    client = TestClient(main.app)
+    user = {"id": 555, "first_name": "Worker", "username": "worker555"}
+    init_data = make_init_data(user)
+
+    client.post(
+        "/api/submit",
+        json={
+            "init_data": init_data,
+            "subject": "SMM",
+            "task": "Задание для воркера",
+            "urgent": False,
+        },
+    )
+
+    response = client.get(
+        "/worker/jobs",
+        headers={"x-worker-secret": main.WORKER_SECRET},
+    )
+    assert response.status_code == 200
+    jobs = response.json()["jobs"]
+    assert len(jobs) > 0
+    job = jobs[0]
+    assert "output_format" in job
+    assert "academic_level" in job
+    assert "tone" in job

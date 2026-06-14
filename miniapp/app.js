@@ -129,6 +129,8 @@ function showHome() {
     $('free-badge').classList.add('hidden');
   }
   show('screen-home');
+  const fmt = state.profile?.preferred_format || 'docx';
+  document.querySelector('#screen-home .stat-card:last-child .stat-value').textContent = '.' + fmt;
 }
 
 // ─── Register ─────────────────────────────────────────────────────────────────
@@ -136,6 +138,9 @@ function showHome() {
 $('btn-register').addEventListener('click', async () => {
   const name  = $('reg-name').value.trim();
   const group = $('reg-group').value.trim();
+  const level = $('reg-level').value;
+  const tone  = $('reg-tone').value;
+  const fmt   = $('reg-format').value;
 
   if (name.length < 2)  { toast('Введи ФИО'); return; }
   if (group.length < 2) { toast('Введи группу'); return; }
@@ -144,7 +149,7 @@ $('btn-register').addEventListener('click', async () => {
   btn.disabled = true;
   btn.textContent = 'Сохраняем...';
   try {
-    const data = await api('POST', '/api/profile', { init_data: initData, name, group });
+    const data = await api('POST', '/api/profile', { init_data: initData, name, group, academic_level: level, tone: tone, preferred_format: fmt });
     state.profile = data.profile;
     state.free    = tg.initDataUnsafe?.user?.id && [1016718472].includes(tg.initDataUnsafe.user.id);
     showHome();
@@ -177,6 +182,9 @@ $('btn-profile-edit').addEventListener('click', () => {
   if (state.profile) {
     $('reg-name').value  = state.profile.name  || '';
     $('reg-group').value = state.profile.group || '';
+    $('reg-level').value = state.profile.academic_level || 'bachelor';
+    $('reg-tone').value  = state.profile.tone || 'formal';
+    $('reg-format').value = state.profile.preferred_format || 'docx';
   }
   show('screen-register');
 });

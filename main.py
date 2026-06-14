@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl
 
+import httpx
 from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -30,6 +31,10 @@ FREE_IDS      = {int(x) for x in os.getenv("FREE_USER_IDS", "1016718472").split(
 PAYMENT_CARD  = os.getenv("PAYMENT_CARD", "").strip()
 PAYMENT_PHONE = os.getenv("PAYMENT_PHONE", "").strip()
 PAYMENT_NAME  = os.getenv("PAYMENT_NAME", "").strip()
+NOTION_TOKEN = os.getenv("NOTION_TOKEN", "").strip()
+NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID", "").strip()
+NOTION_TITLE_PROPERTY = os.getenv("NOTION_TITLE_PROPERTY", "").strip()
+GITHUB_REPO_URL = os.getenv("GITHUB_REPO_URL", "https://github.com/kirill774/lxp_railway").strip()
 ALLOWED_ORIGINS = [
     origin.strip()
     for origin in os.getenv("ALLOWED_ORIGINS", "").split(",")
@@ -71,6 +76,8 @@ _jobs: dict[str, dict] = {}
 
 # orders: list of dicts
 _orders: list[dict] = []
+_notion_title_property_cache: str | None = None
+_notion_properties_cache: dict[str, dict] | None = None
 
 
 def get_user(uid: int) -> dict | None:
@@ -108,6 +115,7 @@ def build_job_response(job: dict, user: dict) -> dict:
         "payment": payment,
         "created_at": job["created_at"],
         "completed_at": job.get("completed_at"),
+        "output_format": job.get("output_format", "docx"),
     }
 
 def append_order_once(job: dict, user: dict) -> None:
@@ -130,7 +138,150 @@ def append_order_once(job: dict, user: dict) -> None:
         "status": "delivered" if free else "awaiting_manual_payment_review",
         "created_at": job["created_at"],
         "completed_at": job.get("completed_at"),
+        "academic_level": job.get("academic_level", "bachelor"),
+        "tone": job.get("tone", "formal"),
+        "preferred_format": job.get("output_format", "docx"),
+        "notion_status": "pending" if notion_enabled() else "disabled",
     })
+
+def notion_enabled() -> bool:
+    return bool(NOTION_TOKEN and NOTION_DATABASE_ID)
+
+def notion_order_summary(order: dict) -> str:
+    return "\n".join([
+        f"Order ID: {order.get('order_id', '')}",
+        f"User ID: {order.get('user_id', '')}",
+        f"Username: @{order.get('username', '')}" if order.get("username") else "Username: ",
+        f"Name: {order.get('name', '')}",
+        f"Group: {order.get('group', '')}",
+        f"Subject: {order.get('subject', '')}",
+        f"Status: {order.get('status', '')}",
+        f"Price: {order.get('price', 0)} RUB / {order.get('stars', 0)} Stars",
+        f"Urgent: {order.get('urgent', False)}",
+        f"Free: {order.get('free', False)}",
+        f"Created: {order.get('created_at', '')}",
+        f"Completed: {order.get('completed_at', '')}",
+        f"Academic Level: {order.get('academic_level', '')}",
+        f"Tone: {order.get('tone', '')}",
+        f"Preferred Format: {order.get('preferred_format', '')}",
+        "",
+        "Task:",
+        order.get("task", ""),
+    ])
+
+async def sync_order_to_notion(order: dict) -> None:
+    if not notion_enabled() or order.get("notion_status") == "synced":
+        return
+
+    title = f"{order.get('subject', 'Order')} - {order.get('order_id', '')}"
+    headers = {
+        "Authorization": f"Bearer {NOTION_TOKEN}",
+        "Notion-Version": "2022-06-28",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
+            properties_meta = await get_notion_database_properties(client, headers)
+            title_property = get_notion_title_property(properties_meta)
+            payload = {
+                "parent": {"database_id": NOTION_DATABASE_ID},
+                "properties": build_notion_order_properties(order, title_property, properties_meta, title),
+                "children": [{
+                    "object": "block",
+                    "type": "paragraph",
+                    "paragraph": {
+                        "rich_text": [{"type": "text", "text": {"content": notion_order_summary(order)[:2000]}}]
+                    },
+                }],
+            }
+            response = await client.post("https://api.notion.com/v1/pages", headers=headers, json=payload)
+            response.raise_for_status()
+            order["notion_status"] = "synced"
+            order["notion_page_id"] = response.json().get("id", "")
+    except Exception as exc:
+        order["notion_status"] = "error"
+        order["notion_error"] = str(exc)[:300]
+        logger.warning("Notion sync failed for %s: %s", order.get("order_id"), exc)
+
+async def get_notion_database_properties(client: httpx.AsyncClient, headers: dict[str, str]) -> dict[str, dict]:
+    global _notion_properties_cache
+    if _notion_properties_cache is not None:
+        return _notion_properties_cache
+
+    response = await client.get(f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}", headers=headers)
+    response.raise_for_status()
+    _notion_properties_cache = response.json().get("properties", {})
+    return _notion_properties_cache
+
+def get_notion_title_property(properties: dict[str, dict]) -> str:
+    global _notion_title_property_cache
+    if NOTION_TITLE_PROPERTY:
+        return NOTION_TITLE_PROPERTY
+    if _notion_title_property_cache:
+        return _notion_title_property_cache
+
+    for name, prop in properties.items():
+        if prop.get("type") == "title":
+            _notion_title_property_cache = name
+            return name
+    return "Name"
+
+def build_notion_order_properties(order: dict, title_property: str, properties_meta: dict[str, dict], title: str) -> dict:
+    payment_status = "free" if order.get("free") else "unpaid"
+    if order.get("paid"):
+        payment_status = "paid"
+    elif order.get("status") == "payment_claimed_manual_review":
+        payment_status = "manual_review"
+
+    values = {
+        title_property: ("title", title),
+        "Order ID": ("rich_text", order.get("order_id", "")),
+        "User ID": ("number", order.get("user_id")),
+        "Username": ("rich_text", order.get("username", "")),
+        "Student Name": ("rich_text", order.get("name", "")),
+        "Group": ("rich_text", order.get("group", "")),
+        "Subject": ("rich_text", order.get("subject", "")),
+        "Bot Status": ("select", order.get("status", "")),
+        "Payment Status": ("select", payment_status),
+        "Price RUB": ("number", order.get("price", 0)),
+        "Stars": ("number", order.get("stars", 0)),
+        "Urgent": ("checkbox", bool(order.get("urgent"))),
+        "Free": ("checkbox", bool(order.get("free"))),
+        "Created": ("date", order.get("created_at", "")),
+        "Completed": ("date", order.get("completed_at", "")),
+        "GitHub": ("url", GITHUB_REPO_URL),
+        "Notes": ("rich_text", notion_order_summary(order)),
+        "Academic Level": ("select", order.get("academic_level", "")),
+        "Tone": ("select", order.get("tone", "")),
+        "Preferred Format": ("select", order.get("preferred_format", "")),
+    }
+
+    notion_properties = {}
+    for name, (expected_type, value) in values.items():
+        if properties_meta.get(name, {}).get("type") != expected_type:
+            continue
+        if expected_type == "title":
+            notion_properties[name] = {"title": [{"text": {"content": str(value)[:2000]}}]}
+        elif expected_type == "rich_text":
+            notion_properties[name] = {"rich_text": [{"text": {"content": str(value)[:2000]}}]}
+        elif expected_type == "select" and value:
+            notion_properties[name] = {"select": {"name": str(value)}}
+        elif expected_type == "number" and value is not None:
+            notion_properties[name] = {"number": value}
+        elif expected_type == "checkbox":
+            notion_properties[name] = {"checkbox": bool(value)}
+        elif expected_type == "date" and value:
+            notion_properties[name] = {"date": {"start": str(value)}}
+        elif expected_type == "url" and value:
+            notion_properties[name] = {"url": str(value)}
+    return notion_properties
+
+async def sync_completed_job_order(job: dict, user: dict) -> None:
+    append_order_once(job, user)
+    order = next((o for o in _orders if o.get("order_id") == job["order_id"]), None)
+    if order:
+        await sync_order_to_notion(order)
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -210,6 +361,9 @@ class ProfileIn(BaseModel):
     default_format: str = "docx"
     contact: str = ""
     notes: str = ""
+    academic_level: str = "bachelor"
+    tone: str = "formal"
+    preferred_format: str = "docx"
 
 class TaskIn(BaseModel):
     init_data: str
@@ -246,7 +400,10 @@ async def health():
         "version": "1.1", 
         "pending": pending, 
         "processing": processing,
-        "status": "healthy" if BOT_TOKEN else "unconfigured"
+        "status": "healthy" if BOT_TOKEN else "unconfigured",
+        "integrations": {
+            "notion": "configured" if notion_enabled() else "missing_env",
+        },
     }
 
 @app.get("/api/subjects")
@@ -268,6 +425,9 @@ async def save_profile(body: ProfileIn):
         "default_format": body.default_format,
         "contact": body.contact,
         "notes": body.notes,
+        "academic_level": body.academic_level,
+        "tone": body.tone,
+        "preferred_format": body.preferred_format,
         "registered_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     save_user(uid, profile)
@@ -322,6 +482,9 @@ async def submit_task(body: TaskIn):
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "result":    None,
         "error":     None,
+        "output_format": body.output_format,
+        "academic_level": profile.get("academic_level", "bachelor"),
+        "tone": profile.get("tone", "formal"),
     }
 
     logger.info("Job %s created for user %s: %s", job_id, uid, task[:60])
@@ -336,7 +499,7 @@ async def get_job(job_id: str, init_data: str):
     if not job or job.get("user_id") != user["id"]:
         raise HTTPException(404, "Job not found")
     if job["status"] == "done":
-        append_order_once(job, user)
+        await sync_completed_job_order(job, user)
     return build_job_response(job, user)
 
 @app.post("/api/payment_confirm")

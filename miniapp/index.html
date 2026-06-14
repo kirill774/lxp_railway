@@ -33,6 +33,30 @@
           <label>Группа</label>
           <input id="reg-group" type="text" placeholder="2БМ2.24">
         </div>
+        <div class="field">
+          <label>Уровень обучения</label>
+          <select id="reg-level">
+            <option value="college">Колледж / СПО</option>
+            <option value="bachelor" selected>Бакалавриат</option>
+            <option value="master">Магистратура</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Тональность работ</label>
+          <select id="reg-tone">
+            <option value="formal" selected>Академический / формальный</option>
+            <option value="neutral">Нейтральный</option>
+            <option value="casual">Разговорный</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Формат по умолчанию</label>
+          <select id="reg-format">
+            <option value="docx" selected>.docx (Word)</option>
+            <option value="txt">.txt (текст)</option>
+            <option value="pptx">.pptx (PowerPoint)</option>
+          </select>
+        </div>
         <button id="btn-register" class="btn-primary">Сохранить профиль</button>
       </div>
     </div>
