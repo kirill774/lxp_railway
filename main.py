@@ -78,6 +78,8 @@ PRICES = {
     "assignment": {"label": "Задание",                 "rub": 600,  "stars": 465},
 }
 
+WORKER_JOB_TIMEOUT_SECS = 300  # 5 minutes — reset stale processing jobs
+
 SUBJECTS = [
     "SMM для бизнеса", "Контент-маркетинг", "Event-маркетинг",
     "Брендинг. Стратегии", "Английский язык А2", "Фотосъёмка",
@@ -814,11 +816,23 @@ async def download_job_file(job_id: str, init_data: str, fmt: str = ""):
 async def worker_get_jobs(x_worker_secret: str = Header(...)):
     if not worker_auth(x_worker_secret):
         raise HTTPException(403, "Invalid worker secret")
+
+    now = time.time()
+    for job in list(_jobs.values()):
+        if job["status"] != "processing":
+            continue
+        started_at = job.get("processing_started_at", 0)
+        if started_at and now - float(started_at) > WORKER_JOB_TIMEOUT_SECS:
+            job["status"] = "pending"
+            job.pop("processing_started_at", None)
+            logger.warning("Job %s reset from stale processing", job["job_id"])
+
     pending = [j for j in _jobs.values() if j["status"] == "pending"]
     # Берём первые 3 задания и помечаем как processing
     result = []
     for job in pending[:3]:
         _jobs[job["job_id"]]["status"] = "processing"
+        _jobs[job["job_id"]]["processing_started_at"] = time.time()
         result.append(job)
     return {"jobs": result}
 
@@ -860,6 +874,31 @@ async def worker_logs(x_worker_secret: str = Header(...), n: int = 50):
         raise HTTPException(403, "Invalid worker secret")
     entries = list(_log_buffer)[-n:]
     return {"ok": True, "count": len(entries), "logs": entries}
+
+@app.get("/worker/queue")
+async def worker_queue(x_worker_secret: str = Header(...)):
+    if not worker_auth(x_worker_secret):
+        raise HTTPException(403, "Invalid worker secret")
+    return {
+        "ok": True,
+        "pending": [
+            {"job_id": job["job_id"], "subject": job.get("subject"), "created_at": job.get("created_at")}
+            for job in _jobs.values()
+            if job["status"] == "pending"
+        ],
+        "processing": [
+            {
+                "job_id": job["job_id"],
+                "subject": job.get("subject"),
+                "started_at": job.get("processing_started_at"),
+                "use_lxp": job.get("use_lxp"),
+            }
+            for job in _jobs.values()
+            if job["status"] == "processing"
+        ],
+        "done": sum(1 for job in _jobs.values() if job["status"] == "done"),
+        "error": sum(1 for job in _jobs.values() if job["status"] == "error"),
+    }
 
 # ─── Static (Mini App) ────────────────────────────────────────────────────────
 

@@ -190,3 +190,65 @@ def test_worker_gets_job_with_metadata():
     assert "output_format" in job
     assert "academic_level" in job
     assert "tone" in job
+
+
+def test_worker_jobs_sets_processing_started_at_and_queue_endpoint():
+    main._jobs.clear()
+    main._users.clear()
+    client = TestClient(main.app)
+    user = {"id": 666, "first_name": "Queue", "username": "queue666"}
+    init_data = make_init_data(user)
+
+    submit = client.post(
+        "/api/submit",
+        json={
+            "init_data": init_data,
+            "subject": "SMM",
+            "task": "Очередь воркера",
+            "urgent": False,
+            "use_lxp": True,
+        },
+    )
+    assert submit.status_code == 200
+
+    response = client.get("/worker/jobs", headers={"x-worker-secret": main.WORKER_SECRET})
+    assert response.status_code == 200
+    job = response.json()["jobs"][0]
+    assert job["status"] == "processing"
+    assert main._jobs[job["job_id"]]["processing_started_at"]
+
+    queue = client.get("/worker/queue", headers={"x-worker-secret": main.WORKER_SECRET})
+    assert queue.status_code == 200
+    payload = queue.json()
+    assert payload["ok"] is True
+    assert payload["processing"][0]["job_id"] == job["job_id"]
+    assert payload["processing"][0]["use_lxp"] is True
+
+
+def test_worker_resets_stale_processing_job():
+    main._jobs.clear()
+    main._users.clear()
+    client = TestClient(main.app)
+    user = {"id": 777, "first_name": "Stale", "username": "stale777"}
+    init_data = make_init_data(user)
+
+    submit = client.post(
+        "/api/submit",
+        json={
+            "init_data": init_data,
+            "subject": "SMM",
+            "task": "Зависшая задача",
+            "urgent": False,
+        },
+    )
+    assert submit.status_code == 200
+    job_id = submit.json()["job_id"]
+    main._jobs[job_id]["status"] = "processing"
+    main._jobs[job_id]["processing_started_at"] = time.time() - main.WORKER_JOB_TIMEOUT_SECS - 1
+
+    response = client.get("/worker/jobs", headers={"x-worker-secret": main.WORKER_SECRET})
+    assert response.status_code == 200
+    jobs = response.json()["jobs"]
+    assert jobs[0]["job_id"] == job_id
+    assert main._jobs[job_id]["status"] == "processing"
+    assert main._jobs[job_id]["processing_started_at"] > time.time() - 5

@@ -44,6 +44,11 @@ POLL_INTERVAL  = int(os.getenv("POLL_INTERVAL", "5"))
 LXP_HEADLESS   = os.getenv("LXP_HEADLESS", "true").lower() != "false"
 LXP_URL        = "https://newlxp.ru"
 
+_processing: set[str] = set()
+_processing_lock = asyncio.Lock()
+_job_started_at: dict[str, float] = {}
+_lxp_sem = asyncio.Semaphore(1)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s: %(message)s",
@@ -73,84 +78,86 @@ async def lxp_find_task(login: str, password: str, subject: str, task_name: str)
     logger.info("LXP: searching for '%s' / '%s'", subject, task_name)
     tz_text = ""
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=LXP_HEADLESS)
-        context = await browser.new_context(
-            locale="ru-RU",
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        )
-        page = await context.new_page()
+    async with _lxp_sem:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=LXP_HEADLESS)
+            context = await browser.new_context(
+                locale="ru-RU",
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                storage_state=None,
+            )
+            page = await context.new_page()
 
-        try:
-            # 1. Логин
-            await page.goto(f"{LXP_URL}/sign-in", wait_until="networkidle", timeout=30000)
-            await page.fill("input[type='email'], input[type='text']", login)
-            await page.fill("input[type='password']", password)
-            await page.click("button[type='submit'], button:has-text('Войти'), button:has-text('войти')")
-            await page.wait_for_url(f"{LXP_URL}/dashboard", timeout=15000)
-            logger.info("LXP: logged in successfully")
+            try:
+                # 1. Логин
+                await page.goto(f"{LXP_URL}/sign-in", wait_until="networkidle", timeout=30000)
+                await page.fill("input[type='email'], input[type='text']", login)
+                await page.fill("input[type='password']", password)
+                await page.click("button[type='submit'], button:has-text('Войти'), button:has-text('войти')")
+                await page.wait_for_url(f"{LXP_URL}/dashboard", timeout=15000)
+                logger.info("LXP: logged in successfully")
 
-            # 2. Переходим к заданиям
-            await page.goto(f"{LXP_URL}/tasks", wait_until="networkidle", timeout=20000)
-            await asyncio.sleep(2)
+                # 2. Переходим к заданиям
+                await page.goto(f"{LXP_URL}/tasks", wait_until="networkidle", timeout=20000)
+                await asyncio.sleep(2)
 
-            # 3. Ищем задание по названию предмета и задания
-            # Пробуем найти ссылку содержащую название предмета или задания
-            task_link = None
+                # 3. Ищем задание по названию предмета и задания
+                # Пробуем найти ссылку содержащую название предмета или задания
+                task_link = None
 
-            # Сначала пробуем точное совпадение по тексту задания
-            for selector in [
-                f"a:has-text('{task_name[:30]}')",
-                f"a:has-text('{subject[:20]}')",
-                "[class*='task'] a",
-                "[class*='assignment'] a",
-            ]:
-                try:
-                    elements = await page.query_selector_all(selector)
-                    if elements:
-                        # Берём первый подходящий
-                        for el in elements:
-                            text = (await el.text_content() or "").strip()
-                            if (task_name[:15].lower() in text.lower() or
-                                subject[:10].lower() in text.lower()):
-                                task_link = el
+                # Сначала пробуем точное совпадение по тексту задания
+                for selector in [
+                    f"a:has-text('{task_name[:30]}')",
+                    f"a:has-text('{subject[:20]}')",
+                    "[class*='task'] a",
+                    "[class*='assignment'] a",
+                ]:
+                    try:
+                        elements = await page.query_selector_all(selector)
+                        if elements:
+                            # Берём первый подходящий
+                            for el in elements:
+                                text = (await el.text_content() or "").strip()
+                                if (task_name[:15].lower() in text.lower() or
+                                    subject[:10].lower() in text.lower()):
+                                    task_link = el
+                                    break
+                            if task_link:
                                 break
-                        if task_link:
-                            break
-                except Exception:
-                    continue
+                    except Exception:
+                        continue
 
-            # Если не нашли — берём первый элемент с заданием
-            if not task_link:
-                logger.warning("LXP: exact match not found, trying first available task link")
-                try:
-                    task_link = await page.query_selector("[class*='task'] a, [class*='assignment'] a, main a[href*='task']")
-                except Exception:
-                    pass
+                # Если не нашли — берём первый элемент с заданием
+                if not task_link:
+                    logger.warning("LXP: exact match not found, trying first available task link")
+                    try:
+                        task_link = await page.query_selector("[class*='task'] a, [class*='assignment'] a, main a[href*='task']")
+                    except Exception:
+                        pass
 
-            if task_link:
-                await task_link.click()
-                await page.wait_for_load_state("networkidle", timeout=15000)
-                await asyncio.sleep(1)
+                if task_link:
+                    await task_link.click()
+                    await page.wait_for_load_state("networkidle", timeout=15000)
+                    await asyncio.sleep(1)
 
-                # 4. Парсим содержимое ТЗ
-                tz_text = await page.evaluate("""
-                    () => {
-                        // Убираем навигацию, хедер, футер
-                        const skip = ['header','footer','nav','[class*="sidebar"]','[class*="cookie"]'];
-                        skip.forEach(s => document.querySelectorAll(s).forEach(el => el.remove()));
-                        const main = document.querySelector('main') || document.body;
-                        return main.innerText.slice(0, 4000);
-                    }
-                """)
-                logger.info("LXP: parsed task text (%d chars)", len(tz_text))
-            else:
-                logger.warning("LXP: no task link found on page")
+                    # 4. Парсим содержимое ТЗ
+                    tz_text = await page.evaluate("""
+                        () => {
+                            // Убираем навигацию, хедер, футер
+                            const skip = ['header','footer','nav','[class*="sidebar"]','[class*="cookie"]'];
+                            skip.forEach(s => document.querySelectorAll(s).forEach(el => el.remove()));
+                            const main = document.querySelector('main') || document.body;
+                            return main.innerText.slice(0, 4000);
+                        }
+                    """)
+                    logger.info("LXP: parsed task text (%d chars)", len(tz_text))
+                else:
+                    logger.warning("LXP: no task link found on page")
 
-        except Exception as e:
-            logger.error("LXP error: %s", e)
-        finally:
-            await browser.close()
+            except Exception as e:
+                logger.error("LXP error: %s", e)
+            finally:
+                await browser.close()
 
     return tz_text.strip()
 
@@ -232,6 +239,13 @@ async def post_result(job_id: str, answer: str = "", error: str = "") -> None:
 
 async def process_job(job: dict) -> None:
     job_id = job["job_id"]
+    async with _processing_lock:
+        if job_id in _processing:
+            logger.warning("Job %s already being processed, skipping", job_id)
+            return
+        _processing.add(job_id)
+        _job_started_at[job_id] = time.time()
+
     logger.info("Processing job %s | subject=%s | use_lxp=%s",
                 job_id, job.get("subject"), job.get("use_lxp"))
     try:
@@ -255,6 +269,10 @@ async def process_job(job: dict) -> None:
     except Exception as e:
         logger.error("Job %s failed: %s", job_id, e)
         await post_result(job_id, error=str(e))
+    finally:
+        async with _processing_lock:
+            _processing.discard(job_id)
+            _job_started_at.pop(job_id, None)
 
 async def poll_loop() -> None:
     logger.info("Worker started. Railway: %s | Poll: %ds", RAILWAY_URL, POLL_INTERVAL)
@@ -269,8 +287,12 @@ async def poll_loop() -> None:
                 jobs = resp.json().get("jobs", [])
                 if jobs:
                     logger.info("Got %d job(s)", len(jobs))
-                    for job in jobs:
-                        asyncio.create_task(process_job(job))
+                    lxp_jobs = [job for job in jobs if job.get("use_lxp")]
+                    fast_jobs = [job for job in jobs if not job.get("use_lxp")]
+                    if fast_jobs:
+                        await asyncio.gather(*[process_job(job) for job in fast_jobs])
+                    for job in lxp_jobs:
+                        await process_job(job)
                 else:
                     logger.debug("No pending jobs")
             except Exception as e:
