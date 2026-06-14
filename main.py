@@ -10,8 +10,10 @@ import hmac
 import json
 import logging
 import os
+import sqlite3
 import time
 import uuid
+import base64
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl
@@ -29,6 +31,8 @@ from pydantic import BaseModel
 
 BOT_TOKEN     = os.getenv("BOT_TOKEN", "").strip()
 WORKER_SECRET = os.getenv("WORKER_SECRET", "").strip()
+DATABASE_PATH = os.getenv("DATABASE_PATH", "data/lxp_bot.sqlite3").strip()
+FERNET_KEY = os.getenv("FERNET_KEY", "").strip()
 FREE_IDS      = {int(x) for x in os.getenv("FREE_USER_IDS", "1016718472").split(",") if x.strip().isdigit()}
 PAYMENT_CARD  = os.getenv("PAYMENT_CARD", "").strip()
 PAYMENT_PHONE = os.getenv("PAYMENT_PHONE", "").strip()
@@ -101,14 +105,126 @@ _notion_title_property_cache: str | None = None
 _notion_properties_cache: dict[str, dict] | None = None
 
 
+def _db_path() -> Path:
+    path = Path(DATABASE_PATH)
+    if not path.is_absolute():
+        path = Path(__file__).parent / path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _db_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(_db_path())
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("CREATE TABLE IF NOT EXISTS users (tg_id TEXT PRIMARY KEY, data TEXT NOT NULL)")
+    conn.execute("CREATE TABLE IF NOT EXISTS jobs (job_id TEXT PRIMARY KEY, data TEXT NOT NULL)")
+    conn.execute("CREATE TABLE IF NOT EXISTS orders (order_id TEXT PRIMARY KEY, data TEXT NOT NULL)")
+    return conn
+
+
+def _fernet_key() -> bytes:
+    if FERNET_KEY:
+        return FERNET_KEY.encode()
+    seed = f"{BOT_TOKEN}:{WORKER_SECRET}".encode()
+    return base64.urlsafe_b64encode(hashlib.sha256(seed).digest())
+
+
+def _encrypt_secret(value: str) -> str:
+    if not value:
+        return ""
+    from cryptography.fernet import Fernet
+    return Fernet(_fernet_key()).encrypt(value.encode()).decode()
+
+
+def _decrypt_secret(value: str) -> str:
+    if not value:
+        return ""
+    from cryptography.fernet import Fernet, InvalidToken
+    try:
+        return Fernet(_fernet_key()).decrypt(value.encode()).decode()
+    except InvalidToken:
+        logger.warning("Stored encrypted secret cannot be decrypted")
+        return ""
+
+
+def _serialize_user(data: dict) -> dict:
+    return _serialize_secret_fields(data)
+
+
+def _deserialize_user(data: dict) -> dict:
+    return _deserialize_secret_fields(data)
+
+
+def _serialize_secret_fields(data: dict) -> dict:
+    stored = dict(data)
+    password = stored.pop("lxp_password", "")
+    if password:
+        stored["lxp_password_enc"] = _encrypt_secret(password)
+    return stored
+
+
+def _deserialize_secret_fields(data: dict) -> dict:
+    restored = dict(data)
+    if restored.get("lxp_password_enc"):
+        restored["lxp_password"] = _decrypt_secret(restored.pop("lxp_password_enc"))
+    return restored
+
+
+def public_profile(profile: dict | None) -> dict | None:
+    if not profile:
+        return profile
+    public = dict(profile)
+    public.pop("lxp_password", None)
+    public.pop("lxp_password_enc", None)
+    return public
+
+
+def persist_user(uid: int, data: dict) -> None:
+    with _db_conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO users (tg_id, data) VALUES (?, ?)",
+            (str(uid), json.dumps(_serialize_user(data), ensure_ascii=False)),
+        )
+
+
+def persist_job(job: dict) -> None:
+    with _db_conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO jobs (job_id, data) VALUES (?, ?)",
+            (job["job_id"], json.dumps(_serialize_secret_fields(job), ensure_ascii=False)),
+        )
+
+
+def persist_order(order: dict) -> None:
+    with _db_conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO orders (order_id, data) VALUES (?, ?)",
+            (order["order_id"], json.dumps(order, ensure_ascii=False)),
+        )
+
+
+def load_state() -> None:
+    try:
+        with _db_conn() as conn:
+            _users.update({tg_id: _deserialize_user(json.loads(data)) for tg_id, data in conn.execute("SELECT tg_id, data FROM users")})
+            _jobs.update({job_id: _deserialize_secret_fields(json.loads(data)) for job_id, data in conn.execute("SELECT job_id, data FROM jobs")})
+            _orders.extend(json.loads(data) for (data,) in conn.execute("SELECT data FROM orders"))
+    except Exception as exc:
+        logger.warning("SQLite state load failed: %s", exc)
+
+
 def get_user(uid: int) -> dict | None:
     return _users.get(str(uid))
 
 def save_user(uid: int, data: dict) -> None:
     _users[str(uid)] = data
+    persist_user(uid, data)
 
 def get_user_orders(uid: int) -> list:
     return [o for o in _orders if o.get("user_id") == uid]
+
+
+load_state()
 
 def build_job_response(job: dict, user: dict) -> dict:
     free = job["user_id"] in FREE_IDS
@@ -144,7 +260,7 @@ def append_order_once(job: dict, user: dict) -> None:
     if any(o.get("order_id") == job["order_id"] for o in _orders):
         return
     free = job["user_id"] in FREE_IDS
-    _orders.append({
+    order = {
         "order_id": job["order_id"],
         "user_id": job["user_id"],
         "username": user.get("username", ""),
@@ -164,7 +280,9 @@ def append_order_once(job: dict, user: dict) -> None:
         "tone": job.get("tone", "formal"),
         "preferred_format": job.get("output_format", "docx"),
         "notion_status": "pending" if notion_enabled() else "disabled",
-    })
+    }
+    _orders.append(order)
+    persist_order(order)
 
 def notion_enabled() -> bool:
     return bool(NOTION_TOKEN and NOTION_DATABASE_ID)
@@ -221,9 +339,11 @@ async def sync_order_to_notion(order: dict) -> None:
             response.raise_for_status()
             order["notion_status"] = "synced"
             order["notion_page_id"] = response.json().get("id", "")
+            persist_order(order)
     except Exception as exc:
         order["notion_status"] = "error"
         order["notion_error"] = str(exc)[:300]
+        persist_order(order)
         logger.warning("Notion sync failed for %s: %s", order.get("order_id"), exc)
 
 async def get_notion_database_properties(client: httpx.AsyncClient, headers: dict[str, str]) -> dict[str, dict]:
@@ -675,7 +795,7 @@ async def save_profile(body: ProfileIn):
         "registered_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     save_user(uid, profile)
-    return {"ok": True, "profile": profile}
+    return {"ok": True, "profile": public_profile(profile)}
 
 @app.get("/api/profile")
 async def get_profile(init_data: str):
@@ -685,7 +805,7 @@ async def get_profile(init_data: str):
     uid = user["id"]
     return {
         "ok": True,
-        "profile": get_user(uid),
+        "profile": public_profile(get_user(uid)),
         "free": uid in FREE_IDS,
         "orders": get_user_orders(uid),
     }
@@ -733,6 +853,7 @@ async def submit_task(body: TaskIn):
         "lxp_login": profile.get("lxp_login", "") if body.use_lxp else "",
         "lxp_password": profile.get("lxp_password", "") if body.use_lxp else "",
     }
+    persist_job(_jobs[job_id])
 
     logger.info("Job %s created for user %s: %s", job_id, uid, task[:60])
     return build_job_response(_jobs[job_id], user)
@@ -760,6 +881,7 @@ async def payment_confirm(body: PaymentIn):
                 return {"ok": True, "status": "free"}
             o["payment_claimed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
             o["status"] = "payment_claimed_manual_review"
+            persist_order(o)
             return {"ok": True, "status": "manual_review"}
     raise HTTPException(404, "Order not found")
 
@@ -825,6 +947,7 @@ async def worker_get_jobs(x_worker_secret: str = Header(...)):
         if started_at and now - float(started_at) > WORKER_JOB_TIMEOUT_SECS:
             job["status"] = "pending"
             job.pop("processing_started_at", None)
+            persist_job(job)
             logger.warning("Job %s reset from stale processing", job["job_id"])
 
     pending = [j for j in _jobs.values() if j["status"] == "pending"]
@@ -833,6 +956,7 @@ async def worker_get_jobs(x_worker_secret: str = Header(...)):
     for job in pending[:3]:
         _jobs[job["job_id"]]["status"] = "processing"
         _jobs[job["job_id"]]["processing_started_at"] = time.time()
+        persist_job(_jobs[job["job_id"]])
         result.append(job)
     return {"jobs": result}
 
@@ -846,11 +970,13 @@ async def worker_post_result(body: WorkerResultIn, x_worker_secret: str = Header
     if body.error:
         _jobs[body.job_id]["status"] = "error"
         _jobs[body.job_id]["error"]  = body.error
+        persist_job(_jobs[body.job_id])
         logger.error("Job %s failed: %s", body.job_id, body.error)
     else:
         _jobs[body.job_id]["status"] = "done"
         _jobs[body.job_id]["result"] = body.answer
         _jobs[body.job_id]["completed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        persist_job(_jobs[body.job_id])
         logger.info("Job %s done (%d chars)", body.job_id, len(body.answer))
     return {"ok": True}
 
