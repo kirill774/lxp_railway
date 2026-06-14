@@ -160,6 +160,10 @@ SYSTEM_PROMPT = """Ты — опытный студент, который дел
 Пиши естественно, без шаблонных фраз и канцелярита. Не копируй формулировку задания дословно.
 Делай работу конкретной: примеры, шаги, расчёты, аргументы, выводы. Структура должна помогать ответу, а не выглядеть искусственно."""
 
+REVIEWER_PROMPT = """Ты — строгий редактор учебных работ.
+Проверь черновик на соответствие ТЗ, полноту, структуру, естественность языка и признаки шаблонного AI-текста.
+Верни только улучшенную финальную работу без комментариев о проверке. Не расширяй текст без необходимости."""
+
 PROMPT_PROFILES = {
     "kt": [
         "Тип работы: контрольная точка / проверочное задание.",
@@ -256,6 +260,26 @@ def build_prompt(job: dict, lxp_tz: str = "") -> str:
 
     return "\n".join(parts)
 
+def build_review_prompt(job: dict, lxp_tz: str, draft: str) -> str:
+    task_context = build_prompt(job, lxp_tz)
+    return "\n".join([
+        "Проверь и улучши черновик.",
+        "Критерии:",
+        "- все требования ТЗ закрыты;",
+        "- нет воды, клише и искусственных переходов;",
+        "- стиль соответствует уровню и тональности;",
+        "- структура подходит формату файла;",
+        "- факты и выводы не противоречат ТЗ;",
+        "- итоговая версия выглядит как работа живого студента.",
+        "- не увеличивай объём больше чем на 30%, если в ТЗ нет явных недостающих требований.",
+        "",
+        "=== КОНТЕКСТ ЗАДАНИЯ ===",
+        task_context,
+        "=== ЧЕРНОВИК ===",
+        draft,
+        "=== ФИНАЛЬНАЯ ВЕРСИЯ ===",
+    ])
+
 async def generate_answer(job: dict, lxp_tz: str = "") -> str:
     prompt = build_prompt(job, lxp_tz)
     headers = {
@@ -279,6 +303,38 @@ async def generate_answer(job: dict, lxp_tz: str = "") -> str:
         )
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"].strip()
+
+async def review_answer(job: dict, lxp_tz: str, draft: str) -> str:
+    prompt = build_review_prompt(job, lxp_tz, draft)
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": OPENAI_MODEL,
+        "messages": [
+            {"role": "system", "content": REVIEWER_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.55,
+        "max_tokens": 3000,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(
+                f"{OPENAI_BASE_URL}/chat/completions",
+                headers=headers,
+                json=payload,
+            )
+            resp.raise_for_status()
+            reviewed = resp.json()["choices"][0]["message"]["content"].strip()
+            if len(reviewed) > max(len(draft) * 2, 4000):
+                logger.warning("Reviewer output too long, using draft")
+                return draft
+            return reviewed or draft
+    except Exception as exc:
+        logger.warning("Reviewer pass failed, using draft: %s", exc)
+        return draft
 
 # ─── Worker Loop ──────────────────────────────────────────────────────────────
 
@@ -315,8 +371,10 @@ async def process_job(job: dict) -> None:
             else:
                 logger.warning("Job %s: LXP ТЗ не найдено, продолжаем без него", job_id)
 
-        answer = await generate_answer(job, lxp_tz)
-        logger.info("Job %s: answer generated (%d chars)", job_id, len(answer))
+        draft = await generate_answer(job, lxp_tz)
+        logger.info("Job %s: draft generated (%d chars)", job_id, len(draft))
+        answer = await review_answer(job, lxp_tz, draft)
+        logger.info("Job %s: final answer ready (%d chars)", job_id, len(answer))
         await post_result(job_id, answer=answer)
 
     except Exception as e:
